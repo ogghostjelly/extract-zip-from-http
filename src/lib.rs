@@ -1,5 +1,10 @@
-use std::{io, num::ParseIntError};
+use std::{
+    io::{self, BufReader},
+    num::ParseIntError,
+};
 
+use read_ext::ReadExt;
+use structs::{CDFH, CompressionMethod};
 use ureq::{
     Agent,
     http::{Uri, header::ToStrError},
@@ -8,6 +13,7 @@ use ureq::{
 mod read_ext;
 mod rewind_buf;
 mod ring_buffer;
+mod structs;
 
 pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
     let filesize = match filesize {
@@ -36,60 +42,95 @@ fn find_in_central_directory(
 ) -> Result<Option<CDFH>> {
     const CHUNK_SIZE: usize = 1_048_576 / 4; // 1 MB
 
-    let chunks = filesize.div_ceil(CHUNK_SIZE);
-    println!("FIND filesize: {}, chunks: {}", filesize, chunks);
-
-    for chunk_idx in 0..chunks {
-        let from = filesize
-            .checked_sub((chunk_idx + 1) * CHUNK_SIZE)
-            .unwrap_or(0);
-        let to = filesize - (chunk_idx * CHUNK_SIZE) - 1;
-
+    for (from, to) in range_chunks(filesize, CHUNK_SIZE) {
         println!("GET Range: bytes={from}-{to}");
 
-        let req = agent
+        let resp = agent
             .get(uri)
             .header("Range", format!("bytes={from}-{to}"))
             .call()?;
+
+        let reader = resp.into_body().into_reader();
     }
 
     todo!()
 }
 
-fn parse_cdfh_chunk<R: io::Read>(reader: R) -> Result<(Vec<u8>,)> {
-    todo!()
+/// Read a central directory file header or None if it is a false positive.
+/// The iterator should return bytes right after the magic number.
+fn read_cdfh<R: ReadExt>(r: &mut R, maximum_allowed_offset: usize) -> Result<Option<CDFH>> {
+    let version_made_by = r.read_u16()?;
+    let minimum_required_version = r.read_u16()?;
+    // The version is stored in the last 8 bits of the field,
+    // if the version is larger than 63 it's likely a false positive.
+    if (version_made_by & 0xff) > 63 || (minimum_required_version & 0xff) > 63 {
+        eprintln!("Not CDFH: Version");
+        return Ok(None);
+    }
+    let general_purpose_flags = r.read_u16()?;
+    let compression_method_id = r.read_u16()?;
+    let Some(compression_method) = CompressionMethod::from_id(compression_method_id) else {
+        eprintln!("Not CDFH: Bad compression");
+        return Ok(None);
+    };
+    let last_modification_time = r.read_u16()?;
+    let last_modification_date = r.read_u16()?;
+    let crc32 = r.read_u32()?;
+    let compressed_size = r.read_u32()?;
+    let uncompressed_size = r.read_u32()?;
+    let filename_length = r.read_u16()?;
+    let extra_field_length = r.read_u16()?;
+    let file_comment_length = r.read_u16()?;
+    let disk_number = r.read_u16()?;
+    let internal_attrs = r.read_u16()?;
+    let external_attrs = r.read_u32()?;
+    let file_header_offset = r.read_u32()?;
+    if file_header_offset as usize > maximum_allowed_offset {
+        eprintln!("Not CDFH: Offset too big");
+        return Ok(None);
+    }
+
+    // Filename should be valid UTF-8
+    let Ok(filename) = String::from_utf8(r.read_bytes(filename_length as usize)?) else {
+        eprintln!("Not CDFH: Filename invalid");
+        return Ok(None);
+    };
+    let _extra_field = r.skip_bytes(extra_field_length as usize)?;
+    let _file_comment = r.skip_bytes(file_comment_length as usize)?;
+
+    Ok(Some(CDFH {
+        version_made_by,
+        minimum_required_version,
+        general_purpose_flags,
+        compression_method,
+        last_modification_time,
+        last_modification_date,
+        crc32,
+        compressed_size,
+        uncompressed_size,
+        filename_length,
+        extra_field_length,
+        file_comment_length,
+        disk_number,
+        internal_attrs,
+        external_attrs,
+        file_header_offset,
+        filename,
+    }))
 }
 
-struct CDFH {
-    version_made_by: u16,
-    minimum_required_version: u16,
-    general_purpose_flags: u16,
-    compression_method: CompressionMethod,
-    last_modification_time: u16,
-    last_modification_date: u16,
-    crc32: u32,
-    compressed_size: u32,
-    uncompressed_size: u32,
-    filename_length: u16,
-    extra_field_length: u16,
-    file_comment_length: u16,
-    disk_number: u16,
-    internal_attrs: u16,
-    external_attrs: u32,
-    file_header_offset: u32,
-    filename: String,
-}
+/// Split a file into multiple chunks. The last chunk may not be chunk_size long.
+/// Used to pass to a HTTP range request to get bytes out of a zip file.
+fn range_chunks(filesize: usize, chunk_size: usize) -> impl Iterator<Item = (usize, usize)> {
+    let chunks = filesize.div_ceil(chunk_size);
 
-#[derive(Debug)]
-enum CompressionMethod {
-    Stored,
-    Deflated,
-    Deflate64,
-    Bzip2,
-    LZMA,
-    Zstd,
-    XZ,
-    AES,
+    (0..chunks).map(move |chunk_idx| {
+        let from = filesize
+            .checked_sub((chunk_idx + 1) * chunk_size)
+            .unwrap_or(0);
+        let to = filesize - (chunk_idx * chunk_size) - 1;
+        (from, to)
+    })
 }
 
 /// Make a HEAD request and retrive the Content-Length header.
@@ -128,4 +169,6 @@ pub enum Error {
     MissingContentLength,
     #[error("file not found")]
     FileNotFound,
+    #[error("{0}")]
+    Io(#[from] io::Error),
 }

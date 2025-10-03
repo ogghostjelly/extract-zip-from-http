@@ -20,16 +20,6 @@ impl<I: Iterator<Item = io::Result<u8>>> RewindBuffer<I> {
         self.buf_ptr = 0;
     }
 
-    pub fn next(&mut self) -> io::Result<Option<u8>> {
-        match self.peek()? {
-            Some(value) => {
-                self.buf_ptr += 1;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
-    }
-
     pub fn peek(&mut self) -> io::Result<Option<u8>> {
         if let Some(value) = self.buf.get(self.buf_ptr) {
             return Ok(Some(*value));
@@ -46,10 +36,25 @@ impl<I: Iterator<Item = io::Result<u8>>> RewindBuffer<I> {
     }
 }
 
+impl<I: Iterator<Item = io::Result<u8>>> Iterator for RewindBuffer<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.peek() {
+            Ok(Some(value)) => {
+                self.buf_ptr += 1;
+                Some(Ok(value))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 impl<I: Iterator<Item = io::Result<u8>>> io::Read for RewindBuffer<I> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         for i in 0..buf.len() {
-            buf[i] = match self.next()? {
+            buf[i] = match self.next().transpose()? {
                 Some(value) => value,
                 None => return Ok(i),
             }
