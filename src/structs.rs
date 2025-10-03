@@ -73,7 +73,6 @@ pub struct CDFH {
     pub crc32: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    pub filename_length: u16,
     pub extra_field_length: u16,
     pub file_comment_length: u16,
     pub disk_number: u16,
@@ -83,7 +82,7 @@ pub struct CDFH {
     pub filename: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CompressionMethod {
     Stored,
     Deflated,

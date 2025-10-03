@@ -13,19 +13,50 @@ use ureq::{
 mod read_ext;
 mod structs;
 
-pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
+pub fn extract_file(
+    agent: &Agent,
+    uri: Uri,
+    filesize: Option<usize>,
+    name: &str,
+) -> Result<impl io::Read> {
+    let start = std::time::Instant::now();
     let filesize = match filesize {
         Some(filesize) => filesize,
         None => request_content_length(agent, &uri)?,
     };
+    println!(
+        "Got Content-Length in {:?}",
+        std::time::Instant::now() - start
+    );
 
-    let start = std::time::Instant::now();
     let Some(cfdh) = find_in_central_directory(agent, &uri, filesize, name)? else {
         return Err(Error::FileNotFound);
     };
-    println!("Finished in {:?}", std::time::Instant::now() - start);
 
-    todo!()
+    let start = std::time::Instant::now();
+    let resp = agent
+        .get(uri)
+        .header("Range", format!("bytes={}-", cfdh.file_header_offset))
+        .call()?;
+
+    let mut reader = BufReader::new(resp.into_body().into_reader());
+
+    let mut signature = [0; 4];
+    reader.read_exact(&mut signature)?;
+    if signature != *b"PK\x03\x04" {
+        return Err(Error::MalformedFileHeader);
+    }
+
+    let Some(()) = read_fh(&mut reader)? else {
+        return Err(Error::MalformedFileHeader);
+    };
+
+    let reader = reader.take(cfdh.compressed_size as u64);
+    let reader = inflate::DeflateDecoder::new(reader);
+
+    println!("Got FH in {:?}", std::time::Instant::now() - start);
+
+    Ok(reader)
 }
 
 /// Find the central directory entry of a file.
@@ -38,12 +69,16 @@ fn find_in_central_directory(
     filesize: usize,
     name: &str,
 ) -> Result<Option<CDFH>> {
+    let start = std::time::Instant::now();
     let Some(eocd) = request_eocd(agent, uri, filesize)? else {
         return Err(Error::MissingEocd);
     };
+    println!("Got EOCD in {:?}", std::time::Instant::now() - start);
 
     let from = eocd.cd_offset;
     let to = filesize as u64 + eocd.cd_size;
+
+    let start = std::time::Instant::now();
 
     let resp = agent
         .get(uri)
@@ -62,6 +97,7 @@ fn find_in_central_directory(
         if buf == *b"PK\x01\x02" {
             if let Some(cfdh) = read_cdfh(&mut reader, eocd.offset)? {
                 if cfdh.filename == name {
+                    println!("Got CDFH in {:?}", std::time::Instant::now() - start);
                     return Ok(Some(cfdh));
                 }
             }
@@ -196,9 +232,27 @@ fn read_fh<R: ReadExt>(r: &mut R) -> Result<Option<()>> {
 
     let _general_purpose_flags = r.read_u16()?;
     let compression_method_id = r.read_u16()?;
-    let Some(_compression_method) = CompressionMethod::from_id(compression_method_id) else {
+    let Some(compression_method) = CompressionMethod::from_id(compression_method_id) else {
         return Ok(None);
     };
+    assert_eq!(
+        compression_method,
+        CompressionMethod::Deflated,
+        "only DEFLATE compression is supported"
+    );
+
+    let _last_modification_time = r.read_u16()?;
+    let _last_modification_date = r.read_u16()?;
+
+    let _crc32 = r.read_u32()?;
+    let _compressed_size = r.read_u32()?;
+    let _uncompressed_size = r.read_u32()?;
+
+    let filename_length = r.read_u16()?;
+    let extra_field_length = r.read_u16()?;
+
+    let _filename = r.skip_bytes(filename_length as usize)?;
+    let _extra_field = r.skip_bytes(extra_field_length as usize)?;
 
     Ok(Some(()))
 }
@@ -251,7 +305,6 @@ fn read_cdfh<R: ReadExt>(r: &mut R, maximum_allowed_offset: usize) -> Result<Opt
         crc32,
         compressed_size,
         uncompressed_size,
-        filename_length,
         extra_field_length,
         file_comment_length,
         disk_number,
@@ -300,6 +353,8 @@ pub enum Error {
     FileNotFound,
     #[error("{0}")]
     Io(#[from] io::Error),
-    #[error("missing eocd in zip")]
+    #[error("missing eocd")]
     MissingEocd,
+    #[error("malformed file header")]
+    MalformedFileHeader,
 }
