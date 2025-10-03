@@ -5,13 +5,15 @@ use std::{
     num::ParseIntError,
 };
 
-use cursor_read::CursorRead;
+use buf_iter::BufIter;
+use enumerate_iter::EnumerateIter;
 use ureq::{
     Agent,
     http::{Uri, header::ToStrError},
 };
 
-mod cursor_read;
+mod buf_iter;
+mod enumerate_iter;
 
 pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
     let filesize = match filesize {
@@ -61,7 +63,7 @@ fn find_in_central_directory(
         let reader = BufReader::new(req.into_body().into_reader());
         let stray_bytes_vec = mem::take(&mut stray_bytes);
         let reader = reader.chain(stray_bytes_vec.as_slice());
-        let mut reader = CursorRead::new(reader.bytes());
+        let mut reader = EnumerateIter::new(reader.bytes());
 
         let mut buf = match RingBuffer::try_from_iter(&mut reader)? {
             Ok(buf) => buf,
@@ -82,14 +84,11 @@ fn find_in_central_directory(
                 stray_bytes.push(stray);
             }
 
-            if buf.buf.starts_with(b"PK") {
-                println!("found possible match: {:?}", buf);
-            }
-
             if buf.buf == *b"PK\x03\x04" {
                 // Check the version_made_by field of the file header.
                 // If the last 8 bits are bigger than 63 than it's likely a false positive.
-                if (read_u16(&mut reader)? & 0xff) > 63 {
+                let version = read_u16(&mut reader)?;
+                if (version & 0xff) > 63 {
                     // Found a file header.
                     // which means this data must be outside of the central directory record,
                     // and this is the last chunk we need to process.
@@ -98,8 +97,15 @@ fn find_in_central_directory(
 
                     is_stray_bytes = false;
                     is_last_chunk = true;
+                } else if is_stray_bytes {
+                    // TODO: Push header bytes here.
+                    for stray in version.to_le_bytes() {
+                        stray_bytes.push(stray);
+                    }
                 }
             } else if buf.buf == *b"PK\x01\x02" {
+                let mut reader = BufIter::new(&mut reader);
+
                 if let Some(cdfh) = read_cdfh(&mut reader, maximum_allowed_offset)? {
                     // Found a central directory file header.
                     is_stray_bytes = false;
@@ -107,11 +113,14 @@ fn find_in_central_directory(
                     if cdfh.filename == name {
                         return Ok(Some(cdfh));
                     }
+                } else if is_stray_bytes {
+                    // TODO: Push header bytes here.
+                    stray_bytes.append(&mut reader.into_buf());
                 }
             } else if buf.buf == *b"PK\x05\x06" {
                 // Reached the end of the central directory record (EOCD).
                 // no offset should be after the EOCD, so set the maximum allowed offset.
-                maximum_allowed_offset = from + reader.byte_offset - 4;
+                maximum_allowed_offset = from + reader.index - 4;
                 println!("Found EOCD");
                 break;
             }
