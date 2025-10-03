@@ -7,6 +7,7 @@ pub struct Eocd {
     pub cd_records_total: u64,
     pub cd_size: u64,
     pub cd_offset: u64,
+    pub offset: usize,
 }
 
 impl From<Eocd32> for Eocd {
@@ -18,6 +19,7 @@ impl From<Eocd32> for Eocd {
             cd_records_total: value.cd_records_total as u64,
             cd_size: value.cd_size as u64,
             cd_offset: value.cd_offset as u64,
+            offset: value.offset,
         }
     }
 }
@@ -31,6 +33,7 @@ impl From<Eocd64> for Eocd {
             cd_records_total: value.cd_records_total,
             cd_size: value.cd_size,
             cd_offset: value.cd_offset,
+            offset: value.offset,
         }
     }
 }
@@ -44,6 +47,7 @@ pub struct Eocd32 {
     pub cd_records_total: u16,
     pub cd_size: u32,
     pub cd_offset: u32,
+    pub offset: usize,
 }
 
 /// End of central directory record for Zip64.
@@ -55,6 +59,7 @@ pub struct Eocd64 {
     pub cd_records_total: u64,
     pub cd_size: u64,
     pub cd_offset: u64,
+    pub offset: usize,
 }
 
 /// Central directory file header.

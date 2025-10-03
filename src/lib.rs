@@ -40,24 +40,44 @@ fn find_in_central_directory(
     filesize: usize,
     name: &str,
 ) -> Result<Option<CDFH>> {
-    let x = std::time::Instant::now();
     let Some(eocd) = request_eocd(agent, uri, filesize)? else {
         return Err(Error::MissingEocd);
     };
-    println!("Finished in {:?}", std::time::Instant::now() - x);
 
-    println!("EOCD: {eocd:#?}");
+    let from = eocd.cd_offset;
+    let to = filesize as u64 + eocd.cd_size;
 
-    todo!()
+    let resp = agent
+        .get(uri)
+        .header("Range", format!("bytes={from}-{to}"))
+        .call()?;
+
+    let mut reader = BufReader::new(resp.into_body().into_reader());
+    let mut buf: [u8; 4] = [0u8; 4];
+
+    while let Some(value) = (&mut reader).bytes().next() {
+        let value = value?;
+
+        buf[0] = value;
+        buf.rotate_left(1);
+
+        if buf == *b"PK\x01\x02" {
+            if let Some(cfdh) = read_cdfh(&mut reader, eocd.offset)? {
+                if cfdh.filename == name {
+                    return Ok(Some(cfdh));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd>> {
-    const CHUNK_SIZE: usize = 32;
+    const CHUNK_SIZE: usize = 256;
 
     let from = filesize - CHUNK_SIZE;
     let to = filesize - 1;
-
-    println!("{from}-{to}");
 
     let resp = agent
         .get(uri)
@@ -65,7 +85,8 @@ fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd
         .call()?;
 
     let mut reader = BufReader::with_capacity(CHUNK_SIZE, resp.into_body().into_reader());
-    let mut buf: [u8; 4] = [0; 4];
+    let mut buf = [0u8; 4];
+    let mut byte_offset = 0;
 
     while let Some(value) = (&mut reader).bytes().next() {
         let value = value?;
@@ -74,14 +95,16 @@ fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd
         buf.rotate_left(1);
 
         if buf == *b"PK\x05\x06" {
-            if let Some(value) = read_eocd32(&mut reader, filesize)? {
+            if let Some(value) = read_eocd32(&mut reader, from + byte_offset, filesize)? {
                 return Ok(Some(value.into()));
             }
         } else if buf == *b"PK\x06\x06" {
-            if let Some(value) = read_eocd64(&mut reader)? {
+            if let Some(value) = read_eocd64(&mut reader, from + byte_offset)? {
                 return Ok(Some(value.into()));
             }
         }
+
+        byte_offset += 1;
     }
 
     Ok(None)
@@ -89,7 +112,7 @@ fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd
 
 /// Read a EOCD32 or None if Zip64 is used instead.
 /// The given reader should return bytes right after the magic number `PK\x05\x06`.
-fn read_eocd32<R: ReadExt>(r: &mut R, filesize: usize) -> Result<Option<Eocd32>> {
+fn read_eocd32<R: ReadExt>(r: &mut R, offset: usize, filesize: usize) -> Result<Option<Eocd32>> {
     let this_disk_number = r.read_u16()?;
     if this_disk_number > 256 && this_disk_number != 0xff {
         return Ok(None);
@@ -129,12 +152,13 @@ fn read_eocd32<R: ReadExt>(r: &mut R, filesize: usize) -> Result<Option<Eocd32>>
         cd_records_total,
         cd_size,
         cd_offset,
+        offset,
     }))
 }
 
 /// Read a EOCD32 or None if it is a false positive.
 /// The given reader should return bytes right after the magic number `PK\x06\x06`.
-fn read_eocd64<R: ReadExt>(r: &mut R) -> Result<Option<Eocd64>> {
+fn read_eocd64<R: ReadExt>(r: &mut R, offset: usize) -> Result<Option<Eocd64>> {
     let _size = r.read_u64()?;
     let version_made_by = r.read_u16()?;
     let version_to_extract = r.read_u16()?;
@@ -159,6 +183,7 @@ fn read_eocd64<R: ReadExt>(r: &mut R) -> Result<Option<Eocd64>> {
         cd_records_total,
         cd_size,
         cd_offset,
+        offset,
     }))
 }
 
