@@ -1,6 +1,66 @@
+/// End of central directory record.
+#[derive(Debug)]
+pub struct Eocd {
+    pub this_disk_number: u32,
+    pub cd_disk: u32,
+    pub cd_records_on_disk: u64,
+    pub cd_records_total: u64,
+    pub cd_size: u64,
+    pub cd_offset: u64,
+}
+
+impl From<Eocd32> for Eocd {
+    fn from(value: Eocd32) -> Self {
+        Self {
+            this_disk_number: value.this_disk_number as u32,
+            cd_disk: value.cd_disk as u32,
+            cd_records_on_disk: value.cd_records_on_disk as u64,
+            cd_records_total: value.cd_records_total as u64,
+            cd_size: value.cd_size as u64,
+            cd_offset: value.cd_offset as u64,
+        }
+    }
+}
+
+impl From<Eocd64> for Eocd {
+    fn from(value: Eocd64) -> Self {
+        Self {
+            this_disk_number: value.this_disk_number,
+            cd_disk: value.cd_disk,
+            cd_records_on_disk: value.cd_records_on_disk,
+            cd_records_total: value.cd_records_total,
+            cd_size: value.cd_size,
+            cd_offset: value.cd_offset,
+        }
+    }
+}
+
+/// End of central directory record for classic 32-bit zips.
+#[derive(Debug)]
+pub struct Eocd32 {
+    pub this_disk_number: u16,
+    pub cd_disk: u16,
+    pub cd_records_on_disk: u16,
+    pub cd_records_total: u16,
+    pub cd_size: u32,
+    pub cd_offset: u32,
+}
+
+/// End of central directory record for Zip64.
+#[derive(Debug)]
+pub struct Eocd64 {
+    pub this_disk_number: u32,
+    pub cd_disk: u32,
+    pub cd_records_on_disk: u64,
+    pub cd_records_total: u64,
+    pub cd_size: u64,
+    pub cd_offset: u64,
+}
+
+/// Central directory file header.
 pub struct CDFH {
     pub version_made_by: u16,
-    pub minimum_required_version: u16,
+    pub version_to_extract: u16,
     pub general_purpose_flags: u16,
     pub compression_method: CompressionMethod,
     pub last_modification_time: u16,
