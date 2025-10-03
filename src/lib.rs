@@ -1,15 +1,19 @@
 use std::{
+    fmt,
     io::{self, BufReader, Read},
     mem,
     num::ParseIntError,
 };
 
+use cursor_read::CursorRead;
 use ureq::{
     Agent,
     http::{Uri, header::ToStrError},
 };
 
-pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &[u8]) -> Result<()> {
+mod cursor_read;
+
+pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
     let filesize = match filesize {
         Some(filesize) => filesize,
         None => request_content_length(agent, &uri)?,
@@ -32,13 +36,13 @@ fn find_in_central_directory(
     agent: &Agent,
     uri: &Uri,
     filesize: usize,
-    name: &[u8],
+    name: &str,
 ) -> Result<Option<CDFH>> {
-    const CHUNK_SIZE: usize = 1_048_576; // 1 MB
+    const CHUNK_SIZE: usize = 1_048_576 / 4; // 1 MB
 
     let chunks = filesize.div_ceil(CHUNK_SIZE);
 
-    let mut bytes_from_last_read = vec![];
+    let mut stray_bytes: Vec<u8> = vec![];
     let mut maximum_allowed_offset = filesize;
 
     for chunk_idx in 0..chunks {
@@ -55,36 +59,51 @@ fn find_in_central_directory(
             .call()?;
 
         let reader = BufReader::new(req.into_body().into_reader());
-        let append = mem::take(&mut bytes_from_last_read).into_iter().map(Ok);
-        let mut reader = reader.bytes().chain(append);
+        let stray_bytes_vec = mem::take(&mut stray_bytes);
+        let reader = reader.chain(stray_bytes_vec.as_slice());
+        let mut reader = CursorRead::new(reader.bytes());
 
         let mut buf = match RingBuffer::try_from_iter(&mut reader)? {
             Ok(buf) => buf,
             Err(mut buf) => {
-                bytes_from_last_read.append(&mut buf);
+                stray_bytes.append(&mut buf);
                 continue;
             }
         };
 
         let mut is_last_chunk = false;
-        let mut stray_bytes = true;
-        let mut byte_offset = from;
+        let mut is_stray_bytes = true;
 
         while let Some(value) = reader.next() {
             let value = value?;
-            buf.push(value);
+            let stray = buf.push(value);
+
+            if is_stray_bytes {
+                stray_bytes.push(stray);
+            }
+
+            if buf.buf.starts_with(b"PK") {
+                println!("found possible match: {:?}", buf);
+            }
 
             if buf.buf == *b"PK\x03\x04" {
-                // Found a file header.
-                // which means this data must be outside of the central directory record,
-                // and this is the last chunk we need to process.
-                stray_bytes = false;
-                is_last_chunk = true;
-            } else if buf.buf == *b"PK\x01\x02" {
-                // Found a central directory file header.
-                stray_bytes = false;
+                // Check the version_made_by field of the file header.
+                // If the last 8 bits are bigger than 63 than it's likely a false positive.
+                if (read_u16(&mut reader)? & 0xff) > 63 {
+                    // Found a file header.
+                    // which means this data must be outside of the central directory record,
+                    // and this is the last chunk we need to process.
 
+                    println!("Found FH");
+
+                    is_stray_bytes = false;
+                    is_last_chunk = true;
+                }
+            } else if buf.buf == *b"PK\x01\x02" {
                 if let Some(cdfh) = read_cdfh(&mut reader, maximum_allowed_offset)? {
+                    // Found a central directory file header.
+                    is_stray_bytes = false;
+
                     if cdfh.filename == name {
                         return Ok(Some(cdfh));
                     }
@@ -92,13 +111,10 @@ fn find_in_central_directory(
             } else if buf.buf == *b"PK\x05\x06" {
                 // Reached the end of the central directory record (EOCD).
                 // no offset should be after the EOCD, so set the maximum allowed offset.
-                maximum_allowed_offset = byte_offset;
+                maximum_allowed_offset = from + reader.byte_offset - 4;
+                println!("Found EOCD");
                 break;
-            } else if stray_bytes {
-                bytes_from_last_read.push(value);
             }
-
-            byte_offset += 1;
         }
 
         if is_last_chunk {
@@ -142,7 +158,9 @@ fn read_cdfh<I: Iterator<Item = io::Result<u8>>>(
         return Ok(None);
     }
 
-    let filename = read_bytes(reader, filename_length as usize)?;
+    let Ok(filename) = String::from_utf8(read_bytes(reader, filename_length as usize)?) else {
+        return Ok(None);
+    };
     let _extra_field = skip_bytes(reader, extra_field_length as usize)?;
     let _file_comment = skip_bytes(reader, file_comment_length as usize)?;
 
@@ -184,7 +202,7 @@ struct CDFH {
     internal_attrs: u16,
     external_attrs: u32,
     file_header_offset: u32,
-    filename: Vec<u8>,
+    filename: String,
 }
 
 #[derive(Debug)]
@@ -259,6 +277,25 @@ struct RingBuffer<T, const N: usize> {
     ptr: usize,
 }
 
+impl<T: fmt::Debug, const N: usize> fmt::Debug for RingBuffer<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut indicies = (0..N).map(|i| (i + self.ptr) % self.buf.len());
+
+        write!(f, "[")?;
+
+        if let Some(i) = indicies.next() {
+            self.buf[i].fmt(f)?;
+        }
+
+        for i in indicies {
+            write!(f, ", ")?;
+            self.buf[i].fmt(f)?;
+        }
+
+        write!(f, "]")
+    }
+}
+
 impl<T, const N: usize> RingBuffer<T, N> {
     pub fn try_from_iter<I: Iterator<Item = io::Result<T>>>(
         iter: I,
@@ -283,12 +320,13 @@ impl<T, const N: usize> RingBuffer<T, N> {
 }
 
 impl<T, const N: usize> RingBuffer<T, N> {
-    pub fn push(&mut self, value: T) {
-        self.buf[self.ptr] = value;
+    pub fn push(&mut self, value: T) -> T {
+        let value = mem::replace(&mut self.buf[self.ptr], value);
         self.ptr += 1;
         if self.ptr >= self.buf.len() {
             self.ptr = 0;
         }
+        value
     }
 }
 
