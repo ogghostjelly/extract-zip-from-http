@@ -11,9 +11,7 @@ use ureq::{
 };
 
 mod read_ext;
-mod ring_buffer;
 mod structs;
-mod track_reader;
 
 pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
     let filesize = match filesize {
@@ -165,7 +163,6 @@ fn read_eocd64<R: ReadExt>(r: &mut R, offset: usize) -> Result<Option<Eocd64>> {
     // The version is stored in the last 8 bits of the field,
     // if the version is larger than 63 it's likely a false positive.
     if (version_made_by & 0xff) > 63 || (version_to_extract & 0xff) > 63 {
-        eprintln!("Not CDFH: Version");
         return Ok(None);
     }
     let this_disk_number = r.read_u32()?;
@@ -194,14 +191,12 @@ fn read_fh<R: ReadExt>(r: &mut R) -> Result<Option<()>> {
     // The version is stored in the last 8 bits of the field,
     // if the version is larger than 63 it's likely a false positive.
     if (version_to_extract & 0xff) > 63 {
-        eprintln!("Not FH: Version");
         return Ok(None);
     }
 
     let _general_purpose_flags = r.read_u16()?;
     let compression_method_id = r.read_u16()?;
     let Some(_compression_method) = CompressionMethod::from_id(compression_method_id) else {
-        eprintln!("Not FH: Bad compression");
         return Ok(None);
     };
 
@@ -216,13 +211,11 @@ fn read_cdfh<R: ReadExt>(r: &mut R, maximum_allowed_offset: usize) -> Result<Opt
     // The version is stored in the last 8 bits of the field,
     // if the version is larger than 63 it's likely a false positive.
     if (version_made_by & 0xff) > 63 || (version_to_extract & 0xff) > 63 {
-        eprintln!("Not CDFH: Version");
         return Ok(None);
     }
     let general_purpose_flags = r.read_u16()?;
     let compression_method_id = r.read_u16()?;
     let Some(compression_method) = CompressionMethod::from_id(compression_method_id) else {
-        eprintln!("Not CDFH: Bad compression");
         return Ok(None);
     };
     let last_modification_time = r.read_u16()?;
@@ -238,13 +231,11 @@ fn read_cdfh<R: ReadExt>(r: &mut R, maximum_allowed_offset: usize) -> Result<Opt
     let external_attrs = r.read_u32()?;
     let file_header_offset = r.read_u32()?;
     if file_header_offset as usize > maximum_allowed_offset {
-        eprintln!("Not CDFH: Offset too big");
         return Ok(None);
     }
 
     // Filename should be valid UTF-8
     let Ok(filename) = String::from_utf8(r.read_bytes(filename_length as usize)?) else {
-        eprintln!("Not CDFH: Filename invalid");
         return Ok(None);
     };
     let _extra_field = r.skip_bytes(extra_field_length as usize)?;
@@ -269,20 +260,6 @@ fn read_cdfh<R: ReadExt>(r: &mut R, maximum_allowed_offset: usize) -> Result<Opt
         file_header_offset,
         filename,
     }))
-}
-
-/// Split a file into multiple chunks. The last chunk may not be chunk_size long.
-/// Used to pass to a HTTP range request to get bytes out of a zip file.
-fn range_chunks(filesize: usize, chunk_size: usize) -> impl Iterator<Item = (usize, usize)> {
-    let chunks = filesize.div_ceil(chunk_size);
-
-    (0..chunks).map(move |chunk_idx| {
-        let from = filesize
-            .checked_sub((chunk_idx + 1) * chunk_size)
-            .unwrap_or(0);
-        let to = filesize - (chunk_idx * chunk_size) - 1;
-        (from, to)
-    })
 }
 
 /// Make a HEAD request and retrive the Content-Length header.
