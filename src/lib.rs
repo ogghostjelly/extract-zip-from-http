@@ -131,7 +131,9 @@ fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd
         buf.rotate_left(1);
 
         if buf == *b"PK\x05\x06" {
-            if let Some(value) = read_eocd32(&mut reader, from + byte_offset, filesize)? {
+            if let MaybeEocd32::Eocd32(value) =
+                read_eocd32(&mut reader, from + byte_offset, filesize)?
+            {
                 return Ok(Some(value.into()));
             }
         } else if buf == *b"PK\x06\x06" {
@@ -146,26 +148,26 @@ fn request_eocd(agent: &Agent, uri: &Uri, filesize: usize) -> Result<Option<Eocd
     Ok(None)
 }
 
-/// Read a EOCD32 or None if Zip64 is used instead.
+/// Read a EOCD32 record.
 /// The given reader should return bytes right after the magic number `PK\x05\x06`.
-fn read_eocd32<R: ReadExt>(r: &mut R, offset: usize, filesize: usize) -> Result<Option<Eocd32>> {
+fn read_eocd32<R: ReadExt>(r: &mut R, offset: usize, filesize: usize) -> Result<MaybeEocd32> {
     let this_disk_number = r.read_u16()?;
     if this_disk_number > 256 && this_disk_number != 0xff {
-        return Ok(None);
+        return Ok(MaybeEocd32::FalsePositive);
     }
     let cd_disk = r.read_u16()?;
     if cd_disk > 256 && cd_disk != 0xff {
-        return Ok(None);
+        return Ok(MaybeEocd32::FalsePositive);
     }
     let cd_records_on_disk = r.read_u16()?;
     let cd_records_total = r.read_u16()?;
     let cd_size = r.read_u32()?;
     if cd_size as usize > filesize {
-        return Ok(None);
+        return Ok(MaybeEocd32::FalsePositive);
     }
     let cd_offset = r.read_u32()?;
     if cd_offset as usize > filesize {
-        return Ok(None);
+        return Ok(MaybeEocd32::FalsePositive);
     }
 
     if this_disk_number == 0xff
@@ -175,13 +177,13 @@ fn read_eocd32<R: ReadExt>(r: &mut R, offset: usize, filesize: usize) -> Result<
         && cd_size == 0xffff
         && cd_offset == 0xffff
     {
-        return Ok(None);
+        return Ok(MaybeEocd32::Zip64);
     }
 
     let comment_len = r.read_u16()?;
     let _comment = r.skip_bytes(comment_len as usize)?;
 
-    Ok(Some(Eocd32 {
+    Ok(MaybeEocd32::Eocd32(Eocd32 {
         this_disk_number,
         cd_disk,
         cd_records_on_disk,
@@ -192,7 +194,13 @@ fn read_eocd32<R: ReadExt>(r: &mut R, offset: usize, filesize: usize) -> Result<
     }))
 }
 
-/// Read a EOCD32 or None if it is a false positive.
+enum MaybeEocd32 {
+    FalsePositive,
+    Zip64,
+    Eocd32(Eocd32),
+}
+
+/// Read a EOCD64 or None if it is a false positive.
 /// The given reader should return bytes right after the magic number `PK\x06\x06`.
 fn read_eocd64<R: ReadExt>(r: &mut R, offset: usize) -> Result<Option<Eocd64>> {
     let _size = r.read_u64()?;

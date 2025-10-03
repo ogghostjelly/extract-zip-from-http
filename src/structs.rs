@@ -13,6 +13,7 @@ pub struct Eocd {
     pub cd_size: u64,
     pub cd_offset: u64,
     pub offset: usize,
+    pub is_zip64: bool,
 }
 
 impl From<Eocd32> for Eocd {
@@ -25,6 +26,7 @@ impl From<Eocd32> for Eocd {
             cd_size: value.cd_size as u64,
             cd_offset: value.cd_offset as u64,
             offset: value.offset,
+            is_zip64: false,
         }
     }
 }
@@ -39,6 +41,7 @@ impl From<Eocd64> for Eocd {
             cd_size: value.cd_size,
             cd_offset: value.cd_offset,
             offset: value.offset,
+            is_zip64: true,
         }
     }
 }
