@@ -1,9 +1,13 @@
-use std::num::ParseIntError;
+use std::{io, num::ParseIntError};
 
 use ureq::{
     Agent,
     http::{Uri, header::ToStrError},
 };
+
+mod read_ext;
+mod rewind_buf;
+mod ring_buffer;
 
 pub fn extract_file(agent: &Agent, uri: Uri, filesize: Option<usize>, name: &str) -> Result<()> {
     let filesize = match filesize {
@@ -30,6 +34,29 @@ fn find_in_central_directory(
     filesize: usize,
     name: &str,
 ) -> Result<Option<CDFH>> {
+    const CHUNK_SIZE: usize = 1_048_576 / 4; // 1 MB
+
+    let chunks = filesize.div_ceil(CHUNK_SIZE);
+    println!("FIND filesize: {}, chunks: {}", filesize, chunks);
+
+    for chunk_idx in 0..chunks {
+        let from = filesize
+            .checked_sub((chunk_idx + 1) * CHUNK_SIZE)
+            .unwrap_or(0);
+        let to = filesize - (chunk_idx * CHUNK_SIZE) - 1;
+
+        println!("GET Range: bytes={from}-{to}");
+
+        let req = agent
+            .get(uri)
+            .header("Range", format!("bytes={from}-{to}"))
+            .call()?;
+    }
+
+    todo!()
+}
+
+fn parse_cdfh_chunk<R: io::Read>(reader: R) -> Result<(Vec<u8>,)> {
     todo!()
 }
 
