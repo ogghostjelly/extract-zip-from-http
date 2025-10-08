@@ -31,14 +31,14 @@ pub fn extract_file(
         std::time::Instant::now() - start
     );
 
-    let Some(cfdh) = find_in_central_directory(agent, &uri, filesize, name)? else {
+    let Some(cdfh) = find_in_central_directory(agent, &uri, filesize, name)? else {
         return Err(Error::FileNotFound);
     };
 
     let start = std::time::Instant::now();
     let resp = agent
         .get(uri)
-        .header("Range", format!("bytes={}-", cfdh.file_header_offset))
+        .header("Range", format!("bytes={}-", cdfh.file_header_offset))
         .call()?;
 
     let mut reader = BufReader::new(resp.into_body().into_reader());
@@ -53,7 +53,7 @@ pub fn extract_file(
         return Err(Error::MalformedFileHeader);
     };
 
-    let reader = reader.take(cfdh.compressed_size as u64);
+    let reader = reader.take(cdfh.compressed_size as u64);
     let reader = inflate::DeflateDecoder::new(reader);
 
     println!("Got File Header in {:?}", std::time::Instant::now() - start);
@@ -78,7 +78,7 @@ fn find_in_central_directory(
     println!("Got EOCD in {:?}", std::time::Instant::now() - start);
 
     let from = eocd.cd_offset;
-    let to = filesize as u64 + eocd.cd_size;
+    let to = eocd.cd_offset as u64 + eocd.cd_size;
 
     let start = std::time::Instant::now();
 
@@ -97,10 +97,10 @@ fn find_in_central_directory(
         buf.rotate_left(1);
 
         if buf == *b"PK\x01\x02" {
-            if let Some(cfdh) = read_cdfh(&mut reader, eocd.offset)? {
-                if cfdh.filename == name {
+            if let Some(cdfh) = read_cdfh(&mut reader, eocd.offset)? {
+                if cdfh.filename == name {
                     println!("Got CDFH in {:?}", std::time::Instant::now() - start);
-                    return Ok(Some(cfdh));
+                    return Ok(Some(cdfh));
                 }
             }
         }
